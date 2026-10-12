@@ -6,6 +6,8 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
 import plotly.express as px
 import plotly.graph_objects as go
+from dash.dash_table.Format import Format, Scheme, Symbol, Group
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -39,6 +41,19 @@ feature_labels = {
     "velocity_ratio": "Velocity Ratio",
 }
 
+# For display purposes — raw values instead of log-transformed
+raw_display_features = ["uncertainty", "trading_intensity", "avg_trade_size",
+                        "late_capital_ratio", "top3_wallet_concentration", "velocity_ratio"]
+
+raw_feature_labels = {
+    "uncertainty":               "Uncertainty at Open",
+    "trading_intensity":         "Trading Intensity ($/hr)",
+    "avg_trade_size":            "Avg Trade Size ($)",
+    "late_capital_ratio":        "Late Capital Ratio",
+    "top3_wallet_concentration": "Wallet Concentration",
+    "velocity_ratio":            "Velocity Ratio",
+}
+
 known_ids = {
     "d4vd (#1 search)":         "0xea17b1284d10617a57f910b2ea63bdef481b1724a4b899d454ff104bea67b657",
     "d4vd (top 5)":             "0xeaf59fcbf65e45abac0383dad483239d849e6d48d9eb2a6b3bf5cc1c7e9cf2ad",
@@ -66,13 +81,17 @@ if not df.empty and all(f in df.columns for f in features):
         iso.fit(X_c1)
         df.loc[cluster1_idx, "anomaly_flag"] = iso.predict(X_c1)
         df.loc[cluster1_idx, "anomaly_score"] = iso.decision_function(X_c1)
-    df["anomaly_flag"] = df.get("anomaly_flag", pd.Series(1, index=df.index)).fillna(1)
+    if "anomaly_raw" in df.columns and "anomaly_score" not in df.columns:
+        df = df.rename(columns={"anomaly_raw": "anomaly_score"})
     df["anomaly_score"] = df.get("anomaly_score", pd.Series(0, index=df.index)).fillna(0)
 
     # Known cases
     df["known"] = df["market_id"].isin(known_ids.values())
 
     # Marker type for scatter
+    df["marker_size"] = 6
+    df.loc[df["anomaly_flag"] == -1, "marker_size"] = 12
+    df.loc[df["known"], "marker_size"] = 16
     df["marker_type"] = "Normal"
     df.loc[df["cluster"] == 1, "marker_type"] = "High Attractiveness"
     df.loc[(df["cluster"] == 1) & (df["anomaly_flag"] == -1), "marker_type"] = "Flagged Anomaly"
@@ -105,15 +124,18 @@ def make_scatter():
     fig = px.scatter(
         df, x="pc1", y="pc2",
         color="marker_type",
+        size="marker_size",
+        size_max=16,
         color_discrete_map=color_map,
         hover_data={
-            "question": True,
-            "category": True,
-            "volume": True,
+            "marker_size": False,
+            "category": False,
+            "volume": False,
             "marker_type": False,
             "pc1": False,
             "pc2": False,
         },
+        hover_name="question",
         labels={
             "pc1": f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)",
             "pc2": f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)",
@@ -122,13 +144,13 @@ def make_scatter():
         opacity=0.6,
         height=500,
     )
-    fig.update_traces(marker=dict(size=6))
     fig.update_layout(
         plot_bgcolor="white",
         paper_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(t=60, b=40),
     )
+    fig.update_traces(hovertemplate="%{hovertext}<extra></extra>")
     return fig
 
 
@@ -148,7 +170,7 @@ def make_feature_bars():
         barmode="group",
         orientation="h",
         color_discrete_map={"Cluster 0 — Low": "#aec6cf", "Cluster 1 — High": "#e74c3c"},
-        labels={"value": "Mean Value (scaled)", "feature": "", "cluster": ""},
+        labels={"value": "Mean Value (log-scaled where noted)", "feature": "", "cluster": ""},
         height=350,
     )
     fig.update_layout(
@@ -159,20 +181,41 @@ def make_feature_bars():
     )
     return fig
 
+def make_importance_bars():
+    importance_data = [
+        {"feature": "Velocity Ratio",         "importance": 0.006,  "std": 0.001, "group": "secondary"},
+        {"feature": "Uncertainty at Open",     "importance": 0.030,  "std": 0.002, "group": "secondary"},
+        {"feature": "Late Capital Ratio",      "importance": 0.032,  "std": 0.003, "group": "secondary"},
+        {"feature": "Avg Trade Size",          "importance": 0.093,  "std": 0.004, "group": "leading"},
+        {"feature": "Trading Intensity",       "importance": 0.139,  "std": 0.006, "group": "leading"},
+        {"feature": "Wallet Concentration",    "importance": 0.172,  "std": 0.005, "group": "leading"},
+    ]
+    imp_df = pd.DataFrame(importance_data)
+    fig = px.bar(
+        imp_df, x="importance", y="feature",
+        orientation="h",
+        error_x="std",
+        color="group",
+        color_discrete_map={"leading": "#e74c3c", "secondary": "#aec6cf"},
+        labels={"importance": "Mean accuracy drop when feature is shuffled", "feature": "", "group": ""},
+        height=300,
+    )
+    fig.update_layout(
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(t=20, b=20),
+        showlegend=False,
+    )
+    return fig
 
 def make_anomaly_table_data():
-    anomalies = df[df["anomaly_flag"] == -1].copy()
-    anomalies = anomalies.sort_values("anomaly_score")
-    return anomalies[[
-        "question", "category", "volume", "avg_trade_size",
-        "late_capital_ratio", "anomaly_score", "known"
-    ]].assign(
-        volume=anomalies["volume"].apply(lambda x: f"${float(x):,.0f}"),
-        avg_trade_size=anomalies["avg_trade_size"].apply(lambda x: f"${float(x):.0f}"),
-        late_capital_ratio=anomalies["late_capital_ratio"].apply(lambda x: f"{x:.2f}"),
-        anomaly_score=anomalies["anomaly_score"].apply(lambda x: f"{x:.4f}"),
-        known=anomalies["known"].apply(lambda x: "✓" if x else ""),
-    ).to_dict("records")
+    out = df.copy()
+    out = out.sort_values(["cluster", "anomaly_score"], ascending=[False, True])
+    out["known"] = out["known"].apply(lambda x: "✓" if x else "")
+    return out[[
+        "question", "category", "volume", "uncertainty", "trading_intensity", "avg_trade_size",
+        "late_capital_ratio", "top3_wallet_concentration", "velocity_ratio", "anomaly_score", "known"
+    ]].to_dict("records")
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -197,7 +240,28 @@ DIVIDER = {"borderTop": "1px solid #e9ecef", "margin": "0"}
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-app = Dash(__name__)
+app = Dash(__name__, external_stylesheets=[])
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            .js-plotly-plot .plotly .cursor-crosshair { cursor: pointer !important; }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        {%config%}
+        {%scripts%}
+        {%renderer%}
+    </body>
+</html>
+'''
+
 server = app.server
 
 app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "color": "#212529"}, children=[
@@ -241,7 +305,10 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "color": "#2
             "attractiveness. Known insider trading cases are highlighted.",
             style={"color": "#495057", "marginBottom": "24px"},
         ),
-        dcc.Graph(id="pca-scatter", figure=make_scatter()),
+        html.Div(
+            dcc.Graph(id="pca-scatter", figure=make_scatter()),
+            style={"cursor": "pointer"}
+        ),
 
         # Market detail directly below scatter
         html.Div(style={"marginTop": "24px"}, children=[
@@ -260,8 +327,10 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "color": "#2
         html.H2("What Makes a Market Attractive", style={"marginBottom": "8px"}),
         html.P(
             "High-attractiveness markets (Cluster 1) differ from baseline markets on every "
-            "feature. The strongest signals are average trade size and trading intensity — "
-            "consistent with informed traders placing large, well-timed bets.",
+            "feature. The strongest signals are trading intensity and average trade size — "
+            "consistent with informed traders placing large, well-timed bets. "
+            "Trading intensity and average trade size are shown on a log scale to prevent "
+            "outliers from dominating the visualization; all other features are on a natural 0–1 scale.",
             style={"color": "#495057", "marginBottom": "24px"},
         ),
         dcc.Graph(figure=make_feature_bars()),
@@ -269,13 +338,30 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "color": "#2
 
     html.Hr(style=DIVIDER),
 
+    html.Div(style=SECTION, children=[
+        html.H2("Which Features Matter Most", style={"marginBottom": "8px"}),
+        html.P(
+            "Logistic regression, random forest, and permutation importance all produced "
+            "the same ranking. Wallet concentration, trading intensity, and average trade size "
+            "form a leading group — they are correlated with each other (|r| = 0.50–0.74) "
+            "but only weakly correlated with raw market volume and trade count (|r| ≤ 0.38), "
+            "so the clustering is not simply sorting markets by size. "
+            "Error bars show one standard deviation across permutation trials.",
+            style={"color": "#495057", "marginBottom": "24px"},
+        ),
+        dcc.Graph(figure=make_importance_bars()),
+    ]),
+
+    html.Hr(style=DIVIDER),
+
     # ── Section 3: Anomaly table ────────────────────────────────────────────
     html.Div(style=SECTION, children=[
-        html.H2("Flagged Markets", style={"marginBottom": "8px"}),
+        html.H2("Market Explorer", style={"marginBottom": "8px"}),
         html.P(
-            "Isolation Forest identified the most anomalous markets within the "
-            "high-attractiveness cluster. Sorted by anomaly score (lower = more anomalous). "
-            "Known cases are marked ✓.",
+            "All 2,310 markets. Sort and filter to explore. "
+            "Known insider trading cases are marked ✓. "
+            "Anomaly score is only meaningful for Cluster 1 markets — "
+            "lower values indicate more unusual behavior within that cluster.",
             style={"color": "#495057", "marginBottom": "24px"},
         ),
         dash_table.DataTable(
@@ -283,10 +369,22 @@ app.layout = html.Div(style={"fontFamily": "system-ui, sans-serif", "color": "#2
             columns=[
                 {"name": "Question", "id": "question"},
                 {"name": "Category", "id": "category"},
-                {"name": "Volume", "id": "volume"},
-                {"name": "Avg Trade", "id": "avg_trade_size"},
-                {"name": "Late Capital", "id": "late_capital_ratio"},
-                {"name": "Score", "id": "anomaly_score"},
+                {"name": "Volume", "id": "volume", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=0, symbol=Symbol.yes, symbol_prefix="$", group=Group.yes)},
+                {"name": "Uncertainty", "id": "uncertainty", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=2)},
+                {"name": "Intensity ($/hr)", "id": "trading_intensity", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=0, symbol=Symbol.yes, symbol_prefix="$", group=Group.yes)},
+                {"name": "Avg Trade", "id": "avg_trade_size", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=0, symbol=Symbol.yes, symbol_prefix="$")},
+                {"name": "Late Capital", "id": "late_capital_ratio", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=2)},
+                {"name": "Wallet Conc.", "id": "top3_wallet_concentration", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=2)},
+                {"name": "Velocity", "id": "velocity_ratio",
+                "format": Format(scheme=Scheme.fixed, precision=2)},
+                {"name": "Score", "id": "anomaly_score", "type": "numeric",
+                "format": Format(scheme=Scheme.fixed, precision=4)},
                 {"name": "Known", "id": "known"},
             ],
             data=make_anomaly_table_data(),
@@ -322,7 +420,7 @@ def show_detail(click_data):
     if not click_data:
         return "Click any point in the scatter plot to inspect a market."
 
-    question = click_data["points"][0]["customdata"][0]
+    question = click_data["points"][0]["hovertext"]
     matches = df[df["question"] == question]
     if matches.empty:
         return "Market not found."
@@ -334,6 +432,7 @@ def show_detail(click_data):
     # Comparison bar chart
     display_features = {
         "uncertainty":              "Uncertainty at Open",
+        "trading_intensity":        "Trading Intensity ($/hr)",
         "avg_trade_size":           "Avg Trade Size ($)",
         "late_capital_ratio":       "Late Capital Ratio",
         "top3_wallet_concentration":"Wallet Concentration",
@@ -393,6 +492,7 @@ def show_detail(click_data):
                 f"${float(row['volume']):,.0f} volume",
                 style={"color": "#6c757d", "fontSize": "13px", "marginTop": "4px"}
             ),
+            html.Div(f"Trading intensity: ${float(row['trading_intensity']):,.0f}/hr"),
             html.Div(
                 f"Anomaly score: {score:.4f}" if flag == -1 else "Not flagged as anomaly",
                 style={"color": "#e74c3c" if flag == -1 else "#6c757d",
